@@ -30,6 +30,15 @@ control tokens, usage limit keys, and device host tokens, show a source picker n
 Pick **Value** to save the credential itself, or pick a secret provider and enter a reference such
 as `op://vault/item/field`. Copy the reference from 1Password with **Copy Secret Reference**.
 
+To use a variable from a 1Password Environment, enter `op-env://environment-id/VARIABLE` with
+the Environment's ID and the exact variable name. The selected account must have access to that
+Environment. Variables with the same name in different Environments stay separate. A missing or
+empty variable is unreadable; T3 Code never uses a value inherited from the server instead.
+
+Environment references require an `op` version that supports `op run --environment`. When running
+the standalone T3 Code executable, Node must also be available on the server's `PATH`. The desktop
+app includes its own runtime.
+
 T3 Code reads the secret when it needs it, for example when a provider starts. Change the
 credential in 1Password and refresh to use the new value.
 

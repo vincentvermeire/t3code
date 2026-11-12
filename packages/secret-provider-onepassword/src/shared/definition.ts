@@ -30,12 +30,22 @@ const REFERENCE = new RegExp(
   String.raw`^op://${NAME}(?:/${NAME}){2,3}(?:\?[a-z-]+=[A-Za-z0-9_-]+)?$`,
 );
 const MAX_REFERENCE_LENGTH = 1024;
+const ENVIRONMENT_REFERENCE = /^op-env:\/\/([A-Za-z0-9][A-Za-z0-9_-]*)\/([A-Za-z_][A-Za-z0-9_]*)$/;
+
+export const parseEnvironmentReference = (reference: string) => {
+  const match =
+    reference.length <= MAX_REFERENCE_LENGTH ? ENVIRONMENT_REFERENCE.exec(reference) : null;
+  return match ? { environmentId: match[1]!, variable: match[2]! } : undefined;
+};
 
 export const definition = defineSecretProvider({
   kind: SecretProviderKind.make("one_password"),
   label: "1Password",
   configSchema: OnePasswordSecretProviderConfig,
-  isReference: (reference) => reference.length <= MAX_REFERENCE_LENGTH && REFERENCE.test(reference),
-  referencePlaceholder: "op://vault/item/field",
-  invalidReferenceMessage: "Use a 1Password reference like op://vault/item/field.",
+  isReference: (reference) =>
+    reference.length <= MAX_REFERENCE_LENGTH &&
+    (REFERENCE.test(reference) || parseEnvironmentReference(reference) !== undefined),
+  referencePlaceholder: "op://vault/item/field or op-env://environment-id/VARIABLE",
+  invalidReferenceMessage:
+    "Use op://vault/item/field or op-env://environment-id/VARIABLE for a 1Password Environment.",
 });
