@@ -134,6 +134,24 @@ describe("resolveProjectSettings", () => {
     expect(
       resolveProjectSettings(settings, otherProjectId).settings.textGenerationModelSelection,
     ).toEqual(settings.textGenerationModelSelection);
+    const strict = resolveProjectSettings(
+      {
+        ...settings,
+        projectSettingsOverrides: {
+          [projectId]: {
+            ...settings.projectSettingsOverrides[projectId],
+            textGenerationFallbackPolicy: "selected-only",
+            textGenerationModelSelection: settings.textGenerationModelSelection,
+          },
+        },
+      },
+      projectId,
+    );
+    expect(strict.settings.textGenerationModelSelection).toEqual(
+      settings.textGenerationModelSelection,
+    );
+    expect(strict.sources.textGenerationModelSelection).toBe("project");
+    expect(strict.settings.textGenerationFallbackPolicy).toBe("selected-only");
   });
 
   it("falls back to a configured instance when every built-in one is off for the project", () => {

@@ -443,6 +443,10 @@ describe("serverSettings helpers", () => {
     expect(resolveSpeechPostProcessingModelSelection(off, [])).toBe(
       off.textGenerationModelSelection,
     );
+    const strict = { ...off, textGenerationFallbackPolicy: "selected-only" as const };
+    expect(resolveSourceControlWriterModelSelection(strict, [], null)).toBe(selection);
+    expect(resolveReviewGuideModelSelection(strict, [], null)).toBe(selection);
+    expect(resolveSpeechPostProcessingModelSelection(strict, [])).toBe(selection);
   });
 
   it("falls back from a writer provider a project turned off, keeping it for other projects", () => {

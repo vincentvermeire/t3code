@@ -717,16 +717,16 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("server settings"
       }).pipe(Effect.provide(layerServerSettings())),
   );
 
-  it.effect.each(["codex"])(
-    "falls back to enabled instance %s after disabling the selection",
-    (fallbackId) =>
+  it.effect.each(["allow", "selected-only"] as const)(
+    "normalizes a disabled helper selection according to the %s policy",
+    (policy) =>
       Effect.scoped(
         Effect.gen(function* () {
           const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
           const serverConfig = yield* ServerConfig.ServerConfig;
           const fileSystem = yield* FileSystem.FileSystem;
           const writerId = ProviderInstanceId.make("writer");
-          const fallbackInstanceId = ProviderInstanceId.make(fallbackId);
+          const fallbackInstanceId = ProviderInstanceId.make("codex");
           const selection = { instanceId: writerId, model: "claude-sonnet-4-6" };
           const providerInstances = {
             [ProviderInstanceId.make("claudeAgent")]: {
@@ -748,6 +748,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("server settings"
           yield* serverSettings.updateSettings({
             providerInstances,
             textGenerationModelSelection: selection,
+            textGenerationFallbackPolicy: policy,
           });
           const changes = yield* serverSettings.subscribeChanges;
 
@@ -757,10 +758,13 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("server settings"
               [writerId]: { ...providerInstances[writerId]!, enabled: false },
             },
           });
-          const fallbackSelection = {
-            instanceId: fallbackInstanceId,
-            model: DEFAULT_SERVER_SETTINGS.textGenerationModelSelection.model,
-          };
+          const fallbackSelection =
+            policy === "selected-only"
+              ? selection
+              : {
+                  instanceId: fallbackInstanceId,
+                  model: DEFAULT_SERVER_SETTINGS.textGenerationModelSelection.model,
+                };
           assert.deepEqual(next.textGenerationModelSelection, fallbackSelection);
           assert.deepEqual(
             (yield* serverSettings.getSettings).textGenerationModelSelection,

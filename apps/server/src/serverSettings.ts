@@ -511,6 +511,7 @@ function resolveTextGenerationProvider(
   settings: ServerSettings,
   isDriverAllowed: DriverAllowed = anyDriver,
 ): ServerSettings {
+  if (settings.textGenerationFallbackPolicy === "selected-only") return settings;
   const selection = settings.textGenerationModelSelection;
   return isModelSelectionProviderEnabled(settings, selection) &&
     selectionSupportsTextGeneration(settings, selection) &&

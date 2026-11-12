@@ -107,7 +107,18 @@ export const make = Effect.gen(function* () {
     };
 
   const runner = Effect.fn("TextGenerators.runner")(function* (id: ProviderInstanceId) {
-    const config = yield* readConfig(id).pipe(Effect.orElseSucceed(() => undefined));
+    const result = yield* readConfig(id).pipe(Effect.result);
+    if (result._tag === "Failure") {
+      return ((request) =>
+        Effect.fail(
+          new TextGenerationError({
+            operation: request.operation,
+            detail: result.failure.detail,
+            cause: result.failure,
+          }),
+        )) satisfies TextGenerationOperations.Runner;
+    }
+    const config = result.success;
     if (config === undefined) return undefined;
     const label = generatorLabel(config);
     if (!config.enabled) {

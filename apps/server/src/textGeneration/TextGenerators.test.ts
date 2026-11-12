@@ -4,6 +4,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   type TextGeneratorConfig,
+  ServerSettingsError,
 } from "@t3tools/contracts";
 import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
 import * as Effect from "effect/Effect";
@@ -99,6 +100,31 @@ it.effect("a turned-off text generator fails instead of calling its API", () =>
     );
     expect(failure.detail).toBe("OpenRouter is off. Turn it on in Settings → Providers.");
     expect(upstream).not.toHaveBeenCalled();
+  }),
+);
+
+it.effect("a settings read error remains an error instead of an absent generator", () =>
+  Effect.gen(function* () {
+    const generators = yield* TextGenerators.make.pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          Layer.mock(ServerSettings.ServerSettingsService)({
+            getSettings: Effect.fail(
+              new ServerSettingsError({
+                settingsPath: "/settings",
+                operation: "read-file",
+                cause: new Error("Unreadable"),
+              }),
+            ),
+          }),
+          Layer.mock(SecretResolver.SecretResolver)({}),
+          FetchHttpClient.layer,
+        ),
+      ),
+    );
+    const run = yield* generators.runner(ID);
+    expect(run).toBeDefined();
+    expect((yield* Effect.flip(run!(request))).detail).toContain("Couldn't read");
   }),
 );
 

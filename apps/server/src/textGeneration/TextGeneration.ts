@@ -6,13 +6,18 @@ import {
   isProviderAvailable,
   isProviderTextGenerationCapable,
   resolveProjectProviderInstanceEnabled,
+  resolveTextGenerationSelectionEnabled,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import { exhaustedUsageWindow } from "@t3tools/shared/usageLimits";
 import {
   defaultTextGenerationModel,
   fallbackTextGenerationModelSelection,
+  resolveReviewGuideModelSelection,
+  resolveSourceControlWriterModelSelection,
+  resolveSpeechPostProcessingModelSelection,
 } from "@t3tools/shared/serverSettings";
+import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import * as ServerSettings from "../serverSettings.ts";
 import type { ProviderTextGeneration } from "@t3tools/provider-core/server/textGeneration";
 import { TextGenerationError } from "@t3tools/contracts";
@@ -87,6 +92,53 @@ export const make = Effect.gen(function* () {
       modelSelection: ModelSelection,
     ) => Effect.Effect<A, TextGenerationError>,
   ) {
+    const environmentSettings = yield* serverSettings.getSettings.pipe(
+      Effect.mapError(
+        (cause) =>
+          new TextGenerationError({
+            operation,
+            detail: "Could not read text generation settings.",
+            cause,
+          }),
+      ),
+    );
+    const settings = resolveProjectSettings(environmentSettings, projectId ?? null).settings;
+    const selectedOnly = settings.textGenerationFallbackPolicy === "selected-only";
+    if (selectedOnly) {
+      selection =
+        operation === "generateReviewGuide"
+          ? resolveReviewGuideModelSelection(settings, undefined, projectId ?? null)
+          : operation === "generateCommitMessage" ||
+              operation === "generatePrContent" ||
+              operation === "generateBranchName"
+            ? resolveSourceControlWriterModelSelection(settings, undefined, projectId ?? null)
+            : operation === "generateTranscriptionPostProcessing"
+              ? resolveSpeechPostProcessingModelSelection(settings)
+              : settings.textGenerationModelSelection;
+      // An allow-policy environment may already have normalized its generic target. A project
+      // opting in must pin that target itself rather than inherit a potentially substituted one.
+      if (
+        environmentSettings.textGenerationFallbackPolicy === "allow" &&
+        selection === settings.textGenerationModelSelection &&
+        projectId != null &&
+        environmentSettings.projectSettingsOverrides[projectId]?.textGenerationModelSelection ===
+          undefined
+      ) {
+        return yield* new TextGenerationError({
+          operation,
+          detail:
+            "Selected-only project helpers require an explicit project text generation model.",
+        });
+      }
+      if (
+        !resolveTextGenerationSelectionEnabled(settings, projectId ?? null, selection.instanceId)
+      ) {
+        return yield* new TextGenerationError({
+          operation,
+          detail: `Selected text generation target '${selection.instanceId}' is disabled or missing.`,
+        });
+      }
+    }
     const textGenerator = yield* textGenerators.runner(selection.instanceId);
     // A review guide reaches a text generator only through a fallback; it needs an agent instead.
     const textGeneratorId = selection.instanceId;
@@ -105,6 +157,24 @@ export const make = Effect.gen(function* () {
     );
     const now = DateTime.toEpochMillis(yield* DateTime.now);
     const selected = snapshots.find((provider) => provider.instanceId === selection.instanceId);
+    if (
+      selectedOnly &&
+      (textGeneratorCannotRun ||
+        selected === undefined ||
+        !selected.enabled ||
+        !selected.installed ||
+        selected.auth.status === "unauthenticated" ||
+        selected.status === "error" ||
+        !isProviderAvailable(selected) ||
+        !isProviderTextGenerationCapable(selected) ||
+        (operation === "generateReviewGuide" && !INVESTIGATING_DRIVERS.has(selected.driver)) ||
+        exhaustedUsageWindow(selected, now, selection.model))
+    ) {
+      return yield* new TextGenerationError({
+        operation,
+        detail: `Selected text generation target '${selection.instanceId}' is unavailable for ${operation}.`,
+      });
+    }
     // Only a failed probe counts: a pending one is also not installed yet.
     const unusable =
       textGeneratorCannotRun ||
