@@ -31,6 +31,7 @@ import {
   makeAntigravityTextGeneration,
 } from "../../textGeneration/AntigravityTextGeneration.ts";
 import { makeAntigravityAuth, type AntigravityAuth } from "../AntigravityAuth.ts";
+import { mergeAntigravityPrivateMcp, readAntigravityPrivateMcp } from "../antigravityMcpSupport.ts";
 import * as AntigravityInstallation from "../AntigravityInstallation.ts";
 import * as AntigravityUsage from "./AntigravityUsage.ts";
 import {
@@ -199,6 +200,7 @@ export const AntigravityDriver: ProviderDriver<
 
     const makeRuntime = Effect.fn("AntigravityDriver.makeRuntime")(function* (
       input: Omit<AntigravityAcpRuntimeInput, "spawn" | "childProcessSpawner">,
+      { includePrivateMcp = false }: { includePrivateMcp?: boolean } = {},
     ): Effect.fn.Return<
       AcpSessionRuntime.AcpSessionRuntime["Service"],
       AcpErrors.AcpError | ProviderSetupError,
@@ -267,8 +269,50 @@ export const AntigravityDriver: ProviderDriver<
               ),
             ),
       );
+      const privateServers =
+        includePrivateMcp && executable.harnessPath === null
+          ? yield* readAntigravityPrivateMcp(profileDirectory).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderSetupError({
+                    instanceId,
+                    operation: "configure",
+                    detail: cause.message,
+                  }),
+              ),
+            )
+          : [];
+      const combine = <T extends AcpSessionRuntime.AcpSessionActivationOptions>(options: T) =>
+        Effect.try({
+          try: () => mergeAntigravityPrivateMcp(options, privateServers),
+          catch: () =>
+            new AcpErrors.AcpTransportError({
+              cause: undefined,
+              detail:
+                "A private Antigravity MCP server name conflicts with an existing session server.",
+            }),
+        });
+      const activation = (
+        options?: AcpSessionRuntime.AcpSessionActivationOptions,
+      ): Effect.Effect<
+        AcpSessionRuntime.AcpSessionActivationOptions | undefined,
+        AcpErrors.AcpTransportError
+      > =>
+        options === undefined
+          ? Effect.undefined
+          : combine({
+              ...options,
+              mcpServers: options.mcpServers ?? input.mcpServers ?? [],
+              ...((options.acpMcpServers ?? input.acpMcpServers) === undefined
+                ? {}
+                : { acpMcpServers: options.acpMcpServers ?? input.acpMcpServers! }),
+              ...((options.httpMcpServers ?? input.httpMcpServers) === undefined
+                ? {}
+                : { httpMcpServers: options.httpMcpServers ?? input.httpMcpServers! }),
+            });
+      const runtimeInput = privateServers.length ? yield* combine(input) : input;
       const runtime = yield* makeAntigravityAcpRuntime({
-        ...input,
+        ...runtimeInput,
         runtimeVersion: executable.version,
         authMethod: auth.authMethod,
         childProcessSpawner: spawner,
@@ -283,6 +327,25 @@ export const AntigravityDriver: ProviderDriver<
       }).pipe(Effect.provideService(SecureRandom.SecureRandom, random));
       return {
         ...runtime,
+        ...(privateServers.length
+          ? ({
+              loadSession: (sessionId, options) =>
+                activation(options).pipe(
+                  Effect.flatMap((options) => runtime.loadSession(sessionId, options)),
+                ),
+              resumeSession: (sessionId, options) =>
+                activation(options).pipe(
+                  Effect.flatMap((options) => runtime.resumeSession(sessionId, options)),
+                ),
+              forkSession: (sessionId, options, meta) =>
+                activation(options).pipe(
+                  Effect.flatMap((options) => runtime.forkSession(sessionId, options, meta)),
+                ),
+            } satisfies Pick<
+              AcpSessionRuntime.AcpSessionRuntime["Service"],
+              "loadSession" | "resumeSession" | "forkSession"
+            >)
+          : {}),
         ...(executable.harnessPath === null
           ? { setMode: (modeId: string) => runtime.setMode(antigravityCliSessionMode(modeId)) }
           : {}),
@@ -459,7 +522,7 @@ export const AntigravityDriver: ProviderDriver<
     const orchestrationAdapter = yield* makeAntigravityAdapterV2({
       instanceId,
       selfInvocation,
-      makeRuntime,
+      makeRuntime: (input) => makeRuntime(input, { includePrivateMcp: true }),
       withProcess: authFlow.withProcess,
       defaultModel,
       profileDirectory,

@@ -16,6 +16,7 @@ import * as Path from "effect/Path";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
+import * as ChildProcess from "effect/process/ChildProcess";
 import { HttpClient } from "effect/http";
 
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
@@ -57,7 +58,11 @@ function shellQuote(value: string): string {
 }
 
 const makeHarness = Effect.fn("makeAntigravityDriverHarness")(function* (
-  options: { readonly config?: Partial<AntigravitySettings>; readonly enabled?: boolean } = {},
+  options: {
+    readonly config?: Partial<AntigravitySettings>;
+    readonly enabled?: boolean;
+    readonly manual?: boolean;
+  } = {},
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -128,7 +133,13 @@ const makeHarness = Effect.fn("makeAntigravityDriverHarness")(function* (
     selected: AntigravityInstallation.AntigravityExecutable;
     failResolution: boolean;
     beforeAcquire: Effect.Effect<void>;
-  } = { selected: first, failResolution: false, beforeAcquire: Effect.void };
+  } = {
+    selected: options.manual
+      ? { ...first, harnessPath: null, source: "override", version: "1.5.3" }
+      : first,
+    failResolution: false,
+    beforeAcquire: Effect.void,
+  };
   const acquisitions: Array<{ binaryPath: string | undefined; path: string | undefined }> = [];
   const releases: Array<string | null> = [];
   const launches: Array<{
@@ -180,7 +191,11 @@ const makeHarness = Effect.fn("makeAntigravityDriverHarness")(function* (
     Effect.gen(function* () {
       if (command._tag !== "StandardCommand")
         return yield* Effect.die("Unexpected process pipeline.");
-      const handle = yield* spawner.spawn(command);
+      const handle = yield* spawner.spawn(
+        options.manual && command.command === controls.selected.executablePath
+          ? ChildProcess.make(nodePath, [mockAgentPath], command.options)
+          : command,
+      );
       const environment = command.options.env ?? {};
       const env = (name: string) => {
         const value = environment[name];
@@ -213,6 +228,7 @@ const makeHarness = Effect.fn("makeAntigravityDriverHarness")(function* (
     environment: [
       { name: "PATH", value: instancePath },
       { name: "T3_ACP_ANTIGRAVITY", value: "1" },
+      ...(options.manual ? [{ name: "T3_ACP_SESSION_LIFECYCLE", value: "1" }] : []),
       { name: "T3_ACP_REQUEST_LOG_PATH", value: requestLog },
       { name: "GEMINI_API_KEY", value: "must-not-be-used" },
       { name: "google_api_key", value: "must-not-be-used" },
@@ -294,6 +310,100 @@ const layerTest = ProviderHostLive.layer.pipe(
   Layer.provideMerge(ServerSecretStore.layer),
   Layer.provideMerge(layerDeps),
 );
+
+it.layer(layerTest, { excludeTestServices: true })("Antigravity private MCP", (it) => {
+  it.effect(
+    "forwards private MCP on conversational new and resumed/forked sessions while auth stays tool-free",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* makeHarness({ manual: true });
+        const file = h.path.join(h.profileDirectory, "config", "mcp_config.json");
+        yield* h.fs.makeDirectory(h.path.dirname(file), { recursive: true });
+        const text = JSON.stringify({
+          mcpServers: {
+            privateShared: {
+              command: "node",
+              args: ["roots-mcp.mjs", "fixture"],
+              env: { LANG: "en_GB" },
+            },
+          },
+        });
+        yield* h.fs.writeFileString(file, text);
+        yield* h.refresh();
+        expect(
+          (yield* h.readRequests)
+            .filter((request) => request.method === "session/new")
+            .map((request) => request.params?.mcpServers),
+        ).toEqual([[]]);
+        const workspace = yield* h.fs.makeTempDirectoryScoped({ prefix: "t3-private-chat-" });
+        const threadId = ThreadId.make("private-mcp-thread");
+        const modelSelection = { instanceId: h.instance.instanceId, model: "gemini-test-low" };
+        const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          cwd: workspace,
+        });
+        const session = yield* h.instance.orchestrationAdapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make("private-mcp-session"),
+          modelSelection,
+          runtimePolicy,
+        });
+        const thread = yield* session.ensureThread({ threadId, modelSelection, runtimePolicy });
+        const created = (yield* h.readRequests)
+          .filter((request) => request.method === "session/new")
+          .at(-1);
+        expect(created?.params?.mcpServers).toContainEqual({
+          type: "stdio",
+          name: "privateShared",
+          command: "node",
+          args: ["roots-mcp.mjs", "fixture"],
+          env: [{ name: "LANG", value: "en_GB" }],
+        });
+        const restoredSession = yield* h.instance.orchestrationAdapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make("private-mcp-restored-session"),
+          initialNativeThreadId: "mock-session-1",
+          modelSelection,
+          runtimePolicy,
+        });
+        const resumed = yield* restoredSession.resumeThread({
+          providerThread: thread,
+          modelSelection,
+          runtimePolicy,
+        });
+        yield* restoredSession.forkThread({
+          sourceProviderThread: resumed,
+          targetThreadId: ThreadId.make("private-mcp-fork"),
+          modelSelection,
+          runtimePolicy,
+        });
+        yield* restoredSession.resumeThread({
+          providerThread: resumed,
+          modelSelection,
+          runtimePolicy,
+        });
+        const activations = (yield* h.readRequests).filter((request) =>
+          ["session/load", "session/resume", "session/fork"].includes(request.method ?? ""),
+        );
+        expect(activations.map((request) => request.method)).toEqual([
+          "session/resume",
+          "session/fork",
+          "session/resume",
+        ]);
+        for (const request of activations)
+          expect(request.params?.mcpServers).toContainEqual({
+            type: "stdio",
+            name: "privateShared",
+            command: "node",
+            args: ["roots-mcp.mjs", "fixture"],
+            env: [{ name: "LANG", value: "en_GB" }],
+          });
+        expect(yield* h.fs.readFileString(file)).toBe(text);
+        expect(JSON.stringify(yield* h.readRequests)).not.toContain("must-not-be-used");
+      }).pipe(Effect.scoped),
+  );
+});
 
 it.layer(layerTest)("AntigravityDriver", (it) => {
   it.effect.skipIf(windowsHost)(
