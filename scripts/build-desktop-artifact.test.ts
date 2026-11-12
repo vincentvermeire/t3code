@@ -1323,6 +1323,43 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     ),
   );
 
+  it.effect.each([102, 103])(
+    "counts prepared cache files in the Windows %i-file boundary",
+    (fileCount) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const fixture = yield* makeWindowsPayloadFixture({ copyUnpackedNatives: true });
+          const cacheDir = path.join(fixture.packagedAppDir, "resources/server-compile-cache");
+          yield* fs.makeDirectory(cacheDir, { recursive: true });
+          for (let index = 0; index < fileCount - 5; index++) {
+            const directory = index < 22 ? cacheDir : fixture.packagedAppDir;
+            yield* fs.writeFileString(
+              path.join(directory, index.toString(16).padStart(8, "0")),
+              "fixture",
+            );
+          }
+          const validation = validateWindowsPackagedPayload({
+            stageDistDir: fixture.stageDistDir,
+            appExecutableName: fixture.appExecutableName,
+            targetArch: "x64",
+            appVersion: WINDOWS_PAYLOAD_FIXTURE_VERSION,
+          });
+          if (fileCount === 102) {
+            const result = yield* validation;
+            assert.equal(result.fileCount, 102);
+          } else {
+            const error = yield* validation.pipe(Effect.flip);
+            assert.instanceOf(error, WindowsPackagedPayloadValidationError);
+            assert.equal(error.reason, "file-limit-exceeded");
+            assert.equal(error.fileCount, 103);
+            assert.equal(error.fileLimit, 102);
+          }
+        }),
+      ).pipe(Effect.provideService(HostProcess.Platform, "linux")),
+  );
+
   it.effect("rejects a Windows payload that regresses above the file-count budget", () =>
     Effect.scoped(
       Effect.gen(function* () {
