@@ -34,11 +34,20 @@ jobs:
       upstream_tag: ${{ steps.meta.outputs.upstream_tag }}
       commit: ${{ steps.meta.outputs.commit }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 0
-          persist-credentials: false
+      # The repo is public, so git needs no credentials. actions/checkout's credential
+      # cleanup runs `git submodule foreach`, which fails on the orphaned gitlinks in
+      # the vendored .repos tree, so fetch with plain git (as upstream's release does).
+      - name: Checkout
+        shell: bash
+        env:
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch --tags origin "$GITHUB_SHA"
+          git sparse-checkout set --no-cone '/*' '!/.repos/'
+          git checkout --detach "$GITHUB_SHA"
 
       - name: Read release version and base
         id: meta
@@ -114,10 +123,20 @@ jobs:
     env:
       RELEASE_VERSION: ${{ needs.cli.outputs.version }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
+      # The repo is public, so git needs no credentials. actions/checkout's credential
+      # cleanup runs `git submodule foreach`, which fails on the orphaned gitlinks in
+      # the vendored .repos tree, so fetch with plain git (as upstream's release does).
+      - name: Checkout
+        shell: bash
+        env:
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --depth=1 origin "$GITHUB_SHA"
+          git sparse-checkout set --no-cone '/*' '!/.repos/'
+          git -c checkout.workers=0 checkout --detach FETCH_HEAD
 
       - uses: ./.github/actions/setup-ci-deps
         with:
