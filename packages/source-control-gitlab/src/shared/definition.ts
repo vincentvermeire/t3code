@@ -1,4 +1,10 @@
-import { SourceControlProviderKind } from "@t3tools/contracts";
+import {
+  makeProviderSettingsSchema,
+  SettingsSecretValue,
+  SourceControlProviderKind,
+} from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import {
   buildCommitUrl,
   changeRequestUrlBelow,
@@ -26,11 +32,26 @@ const REPOSITORY_PAGE_PATH = /^\/([^/]+(?:\/[^/]+)+?)\/-\//u;
 
 const KIND = SourceControlProviderKind.make("gitlab");
 
+/** A saved token reaches glab as `GITLAB_TOKEN`; a secret provider reference is read once per server life. */
+export const settings = makeProviderSettingsSchema({
+  accessToken: SettingsSecretValue.pipe(
+    Schema.withDecodingDefault(Effect.succeed("")),
+    Schema.annotateKey({
+      title: "Access token",
+      description:
+        "Passed to glab as GITLAB_TOKEN. Give it the api scope. Leave empty to use glab's own login.",
+      providerSettingsForm: { control: "password" },
+    }),
+  ),
+});
+export type GitLabSettings = typeof settings.Type;
+
 export const definition = defineSourceControl({
   kind: KIND,
   label: "GitLab",
   pickerLabel: "GitLab",
   icon,
+  settings,
   changeRequest: {
     shortLabel: "MR",
     shortLabelWithArticle: "an MR",

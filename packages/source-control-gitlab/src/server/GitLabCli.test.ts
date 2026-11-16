@@ -3,7 +3,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { ChildProcessSpawner } from "effect/process";
 
-import { VcsProcessExitError } from "@t3tools/contracts";
+import { DEFAULT_SERVER_SETTINGS, VcsProcessExitError } from "@t3tools/contracts";
 
 import type * as SourceControlHost from "@t3tools/source-control-core/server/SourceControlHost";
 import * as TestSourceControlHost from "@t3tools/source-control-testing/TestSourceControlHost";
@@ -239,6 +239,44 @@ layer("GitLabCli.layer", (it) => {
 
       assert.strictEqual(error._tag, "GitLabCliRateLimitError");
       assert.strictEqual(error.cause, cause);
+    }),
+  );
+});
+
+const tokenLayer = it.layer(
+  GitLabCli.layer.pipe(
+    Layer.provide(
+      TestSourceControlHost.layer({
+        settings: {
+          ...DEFAULT_SERVER_SETTINGS,
+          sourceControlHosts: { gitlab: { accessToken: " saved-token " } },
+        },
+        process: { run: mockedRun },
+      }),
+    ),
+  ),
+);
+
+tokenLayer("GitLabCli.layer with a saved access token", (it) => {
+  it.effect("passes the saved token to glab as GITLAB_TOKEN", () =>
+    Effect.gen(function* () {
+      mockedRun.mockReturnValueOnce(Effect.succeed(processOutput("")));
+
+      yield* Effect.gen(function* () {
+        const glab = yield* GitLabCli.GitLabCli;
+        return yield* glab.execute({
+          cwd: "/repo",
+          args: ["mr", "list"],
+          host: "gitlab.example.com",
+        });
+      });
+
+      expect(mockedRun).toHaveBeenCalledWith(
+        expect.objectContaining({
+          command: "glab",
+          env: { GITLAB_HOST: "gitlab.example.com", GITLAB_TOKEN: "saved-token" },
+        }),
+      );
     }),
   );
 });

@@ -14,7 +14,10 @@ import {
   type VcsProcessExitFailureKind,
 } from "@t3tools/contracts";
 
+import { requireSettingsSecretLiteral } from "@t3tools/contracts";
 import * as SourceControlHost from "@t3tools/source-control-core/server/SourceControlHost";
+import { readSourceControlHostSettings } from "@t3tools/source-control-core/shared/definition";
+import * as GitLabDefinition from "../shared/definition.ts";
 import {
   decodeGitLabMergeRequestJson,
   decodeGitLabMergeRequestListJson,
@@ -428,27 +431,53 @@ const classifyGlabFailure = (stderr: string): VcsProcessExitFailureKind | null =
 
 /** @public */
 export const make = Effect.gen(function* () {
-  const { process } = yield* SourceControlHost.SourceControlHost;
+  const { process, settings: hostSettings } = yield* SourceControlHost.SourceControlHost;
+
+  // The saved token, if any. Its secret reference is read once and cached by the server, so polling
+  // never asks the secret provider again. An unreadable token falls back to glab's own login.
+  const savedToken = hostSettings.getWithSecrets(GitLabDefinition.definition.kind).pipe(
+    Effect.flatMap((settings) =>
+      requireSettingsSecretLiteral(
+        readSourceControlHostSettings(
+          GitLabDefinition.settings,
+          settings.sourceControlHosts[GitLabDefinition.definition.kind],
+        ).accessToken,
+        settings.secretProviders,
+      ),
+    ),
+    Effect.map((token) => token.trim()),
+    Effect.catch(() =>
+      // No cause: a settings decode error can quote a hand-edited token.
+      Effect.logWarning("failed to read the GitLab access token from settings").pipe(Effect.as("")),
+    ),
+  );
 
   const run = (
     input: Parameters<GitLabCli["Service"]["execute"]>[0],
     mapError: (error: VcsError) => GitLabCliError,
   ) =>
-    process
-      .run({
-        operation: "GitLabCli.execute",
-        command: "glab",
-        args: input.args,
-        cwd: input.cwd,
-        // glab may otherwise prefer a different checkout remote.
-        ...(input.host === undefined ? {} : { env: { GITLAB_HOST: input.host } }),
-        classifyFailure: classifyGlabFailure,
-        notFoundDetail: "Merge request not found.",
-        timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-        ...(input.stdin === undefined ? {} : { stdin: input.stdin }),
-        ...(input.maxOutputBytes === undefined ? {} : { maxOutputBytes: input.maxOutputBytes }),
-      })
-      .pipe(Effect.mapError(mapError));
+    savedToken.pipe(
+      Effect.flatMap((token) => {
+        const env = {
+          // glab may otherwise prefer a different checkout remote.
+          ...(input.host === undefined ? {} : { GITLAB_HOST: input.host }),
+          ...(token === "" ? {} : { GITLAB_TOKEN: token }),
+        };
+        return process.run({
+          operation: "GitLabCli.execute",
+          command: "glab",
+          args: input.args,
+          cwd: input.cwd,
+          ...(Object.keys(env).length === 0 ? {} : { env }),
+          classifyFailure: classifyGlabFailure,
+          notFoundDetail: "Merge request not found.",
+          timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+          ...(input.stdin === undefined ? {} : { stdin: input.stdin }),
+          ...(input.maxOutputBytes === undefined ? {} : { maxOutputBytes: input.maxOutputBytes }),
+        });
+      }),
+      Effect.mapError(mapError),
+    );
 
   const execute: GitLabCli["Service"]["execute"] = (input) =>
     run(input, (error) =>
