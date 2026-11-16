@@ -145,7 +145,7 @@ const makeHarness = Effect.fn("makeAntigravityProviderHarness")(function* (
   );
   const safety = yield* Ref.make<Effect.Effect<boolean>>(Effect.succeed(options.safe ?? true));
   const provider = yield* makeAntigravityProvider(
-    decodeSettings({ enabled: options.enabled ?? true, customModels: ["do-not-seed-me"] }),
+    decodeSettings({ enabled: options.enabled ?? true }),
     {
       stampIdentity: (snapshot) => Effect.succeed({ ...snapshot, instanceId, driver }),
       ...(options.auth ? { auth: options.auth } : {}),
@@ -242,6 +242,26 @@ describe("Antigravity model catalog", () => {
       "Gemini 3.8 Flash",
       "Gemini 3.8 Flash (gemini-3.8-flash-preview)",
     ]);
+  });
+
+  it("keeps only the configured custom models when any are set", () => {
+    const setup = {
+      configOptions: [
+        {
+          ...modelConfig,
+          currentValue: "gemini-3.8-flash",
+          options: [
+            { value: "gemini-3.8-flash", name: "Gemini 3.8 Flash" },
+            { value: "argon", name: "Argon" },
+          ],
+        },
+      ],
+    };
+    const slugs = (customModels: AntigravitySettings["customModels"]) =>
+      buildAntigravityModelsFromSession(setup, new Map(), customModels).map((model) => model.slug);
+
+    expect(slugs([{ slug: "gemini-3.8-flash" }, "do-not-seed-me"])).toEqual(["gemini-3.8-flash"]);
+    expect(slugs([])).toEqual(["gemini-3.8-flash", "argon"]);
   });
 
   it("offers each model the thinking levels it reported when selected", () => {

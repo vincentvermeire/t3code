@@ -8,7 +8,7 @@ import {
   type ServerProviderSlashCommand,
   type ServerProviderUsageLimits,
 } from "@t3tools/contracts";
-import { createModelCapabilities } from "@t3tools/shared/model";
+import { createModelCapabilities, readCustomModelEntries } from "@t3tools/shared/model";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -72,7 +72,10 @@ function thinkingCapabilities(config: ThinkingConfig | null | undefined, observe
 export function buildAntigravityModelsFromSession(
   setup: SessionSetupResult,
   thinkingLevels: AntigravityThinkingLevels = new Map(),
+  customModels: AntigravitySettings["customModels"] = [],
 ): ReadonlyArray<ServerProviderModel> {
+  // A model gateway serves only the configured models; the agent lists more than it can reach.
+  const served = new Set(readCustomModelEntries(customModels).map((model) => model.slug));
   const config = setup.configOptions?.find(
     (option) => option.id === "model" || option.category === "model",
   );
@@ -93,6 +96,7 @@ export function buildAntigravityModelsFromSession(
   const names = new Set<string>();
   return entries.flatMap((entry): ServerProviderModel[] => {
     if (!entry.value.trim() || seen.has(entry.value)) return [];
+    if (served.size > 0 && !served.has(entry.value)) return [];
     seen.add(entry.value);
     const baseName = entry.name.trim() ? entry.name : entry.value;
     const name = names.has(baseName) ? `${baseName} (${entry.value})` : baseName;
@@ -391,7 +395,11 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
             label: options.auth?.label ?? "Google account",
           },
           checkedAt: updatedAt,
-          models: buildAntigravityModelsFromSession(started.sessionSetupResult, thinkingLevels),
+          models: buildAntigravityModelsFromSession(
+            started.sessionSetupResult,
+            thinkingLevels,
+            settings.customModels,
+          ),
           supportsTextGeneration,
           ...(cwd
             ? {
@@ -416,7 +424,11 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
     configOptions: ReadonlyArray<EffectAcpSchema.SessionConfigOption>,
   ) {
     observeThinkingLevels(configOptions);
-    const models = buildAntigravityModelsFromSession({ configOptions }, thinkingLevels);
+    const models = buildAntigravityModelsFromSession(
+      { configOptions },
+      thinkingLevels,
+      settings.customModels,
+    );
     yield* SubscriptionRef.update(metadata, (state) => {
       if (state.draft.auth.status !== "authenticated") return state;
       return { ...state, draft: { ...state.draft, models } };
