@@ -1,0 +1,210 @@
+# Builds an unsigned Windows x64 installer and saves a draft fork release.
+# Start by pushing a tag such as v0.1.10-roots.1 on the patched commit.
+# Publishing the resulting draft needs Vincent's OK for that exact release.
+name: Roots release
+
+on:
+  push:
+    tags:
+      - "v*-roots.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: roots-release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  T3CODE_TELEMETRY_CHANNEL: dev
+  T3CODE_DESKTOP_UPDATE_REPOSITORY: vincentvermeire/t3code
+  T3CODE_DESKTOP_SIGNED: "false"
+
+jobs:
+  cli:
+    if: github.repository == 'vincentvermeire/t3code'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      upstream_tag: ${{ steps.meta.outputs.upstream_tag }}
+      commit: ${{ steps.meta.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Read release version and base
+        id: meta
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-roots\.[0-9]+$ ]]
+          upstream_tag=$(git describe --tags --match 'v[0-9]*' --exclude '*-roots.*' --abbrev=0 HEAD)
+          commit=$(git rev-parse HEAD)
+          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          echo "upstream_tag=$upstream_tag" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+      - uses: ./.github/actions/setup-ci-deps
+        with:
+          install-args: --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
+
+      - name: Install Linux archive libraries
+        run: sudo apt-get update && sudo apt-get install -y libatomic1 patchelf
+
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Build versioned web, server and Electron bundles
+        env:
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+          APP_VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          node scripts/update-release-package-versions.ts "$RELEASE_VERSION"
+          vp run build:desktop:bundle
+
+      - name: Build CLI executable and resource monitor
+        run: |
+          set -euo pipefail
+          node apps/server/scripts/cli.ts build-exe --verbose
+          cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml --target x86_64-unknown-linux-gnu
+          mkdir -p "$RUNNER_TEMP/cli-resource-monitor/linux-x64"
+          cp native/resource-monitor/target/x86_64-unknown-linux-gnu/release/t3-resource-monitor "$RUNNER_TEMP/cli-resource-monitor/linux-x64/"
+
+      - name: Archive and smoke-test the CLI
+        env:
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          node scripts/build-cli-archive.ts --platform linux --arch x64 --version "$RELEASE_VERSION" \
+            --resource-monitor-dir "$RUNNER_TEMP/cli-resource-monitor" --output-dir release-cli
+          node scripts/smoke-cli-archive.ts --archive "release-cli/t3-$RELEASE_VERSION-linux-x64.tar.gz" --expect-version "$RELEASE_VERSION"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: roots-js-bundle
+          path: |
+            apps/server/dist
+            apps/desktop/dist-electron
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: roots-cli-linux-x64
+          path: release-cli/*.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+
+  windows:
+    needs: cli
+    if: github.repository == 'vincentvermeire/t3code'
+    runs-on: windows-2025
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    env:
+      RELEASE_VERSION: ${{ needs.cli.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-ci-deps
+        with:
+          install-args: --filter=@t3tools/desktop... --filter=t3... --filter=@t3tools/scripts...
+
+      - name: Ensure Electron runtime is installed
+        run: vp run --filter @t3tools/desktop ensure:electron
+
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+
+      - name: Ensure Windows native build tools
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python --version
+          if ($LASTEXITCODE -ne 0) { throw 'Python 3 is required.' }
+          tar.exe --version
+          if ($LASTEXITCODE -ne 0) { throw 'Windows tar is required.' }
+          $installerDir = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer'
+          $vswhere = Join-Path $installerDir 'vswhere.exe'
+          $installation = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$installation) { throw 'Visual Studio C++ tools and Windows SDK are required.' }
+          $toolset = Get-ChildItem (Join-Path $installation 'VC\Tools\MSVC') -Directory | Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
+          if (!$toolset -or !(Test-Path (Join-Path $toolset.FullName 'lib\spectre\x64'))) {
+            $process = Start-Process -FilePath (Join-Path $installerDir 'vs_installer.exe') -ArgumentList @(
+              'modify', '--installPath', ('"' + $installation + '"'),
+              '--add', 'Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre',
+              '--quiet', '--norestart'
+            ) -WindowStyle Hidden -Wait -PassThru
+            if ($process.ExitCode -notin @(0, 3010)) { throw "Spectre library installation failed: $($process.ExitCode)" }
+          }
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: roots-js-bundle
+          path: apps
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: roots-cli-linux-x64
+          path: release-cli
+
+      - name: Build unsigned Windows x64 installer
+        run: |
+          set -euo pipefail
+          node scripts/update-release-package-versions.ts "$RELEASE_VERSION"
+          node scripts/build-desktop-artifact.ts --platform win --target nsis --arch x64 \
+            --build-version "$RELEASE_VERSION" --skip-build --verbose \
+            --wsl-runtime "release-cli/t3-$RELEASE_VERSION-linux-x64.tar.gz" --output-dir release
+
+      - name: Collect and validate release assets
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          cp "release/T3-Code-$RELEASE_VERSION-x64.exe" "release/T3-Code-$RELEASE_VERSION-x64.exe.blockmap" \
+            release/latest.yml "release-cli/t3-$RELEASE_VERSION-linux-x64.tar.gz" release-assets/
+          cd release-assets
+          sha256sum "T3-Code-$RELEASE_VERSION-x64.exe" "t3-$RELEASE_VERSION-linux-x64.tar.gz" > SHA256SUMS
+          sha256sum --check SHA256SUMS
+
+      - name: Refuse to modify an already published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          published=$(gh api repos/vincentvermeire/t3code/releases --paginate --jq '.[] | select(.tag_name == env.RELEASE_TAG and .draft == false) | .id')
+          [[ -z "$published" ]] || { echo 'This tag already has a published release.' >&2; exit 1; }
+
+      - name: Save draft release
+        uses: softprops/action-gh-release@v3
+        with:
+          repository: vincentvermeire/t3code
+          tag_name: ${{ github.ref_name }}
+          target_commitish: ${{ needs.cli.outputs.commit }}
+          name: T3 Code ${{ github.ref_name }}
+          body: |
+            Based on upstream tag ${{ needs.cli.outputs.upstream_tag }}.
+            Fork commit ${{ needs.cli.outputs.commit }}.
+
+            Unsigned Windows x64 installer. Publishing this draft needs Vincent's OK.
+          draft: true
+          prerelease: false
+          make_latest: false
+          files: release-assets/*
+          fail_on_unmatched_files: true
+          token: ${{ github.token }}
